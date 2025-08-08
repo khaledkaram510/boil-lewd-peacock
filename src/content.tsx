@@ -1,12 +1,363 @@
-// content.tsx
-import { useEffect } from "react"
+import { HighlightOverlay } from "@/components/HighlightOverlay"
+import { HighlightToolbar } from "@/components/HighlightToolbar"
+import { HighlightTooltip } from "@/components/HighlightTooltip"
+import { getElementByXPath, HighlightStorage } from "@/lib/storage"
+import type { Highlight } from "@/lib/types"
+import React, { useEffect, useState } from "react"
+import { createRoot } from "react-dom/client"
 
+// CSS class name used to identify highlighted text elements
+const HIGHLIGHT_CLASS = "text-highlight-extension"
+// Key for storing activation state in localStorage
+const ACTIVATION_STATE_KEY = "highlighter_activated"
+
+/**
+ * Main content script component that handles text highlighting functionality
+ * This component is injected into web pages and manages:
+ * - Extension activation state persistence
+ * - Draggable toolbar display
+ * - Manual text selection for highlighting
+ * - Highlight creation and rendering
+ * - User interactions with highlights
+ */
 const Content = () => {
-  useEffect(() => {
-    document.body.style.border = "5px solid red"
-  }, [])
+  // State management for extension activation and UI
+  const [isActivated, setIsActivated] = useState(false) // Controls extension activation state
+  const [showToolbar, setShowToolbar] = useState(false) // Controls toolbar visibility
+  const [showOverlay, setShowOverlay] = useState(false) // Controls highlight creation overlay visibility
+  const [showTooltip, setShowTooltip] = useState(false) // Controls highlight tooltip visibility
+  const [isSelectingForNote, setIsSelectingForNote] = useState(false) // True when user clicked note icon and is selecting text
+  const [selectedText, setSelectedText] = useState("") // Stores currently selected text
+  const [selectedColor, setSelectedColor] = useState("#fef08a") // Currently selected highlight color
+  const [overlayPosition, setOverlayPosition] = useState({ x: 0, y: 0 }) // Position for highlight overlay
+  const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 }) // Position for highlight tooltip
+  const [activeHighlight, setActiveHighlight] = useState<Highlight | null>(null) // Currently active highlight for tooltip
 
-  return null
+  useEffect(() => {
+    // Load activation state from localStorage on component mount
+    const savedState = localStorage.getItem(ACTIVATION_STATE_KEY)
+    const activated = savedState === "true"
+    setIsActivated(activated)
+    setShowToolbar(activated)
+
+    // Always load and render existing highlights regardless of activation state
+    renderHighlights()
+
+    /**
+     * Handles messages from the extension popup and background script
+     * Supports toggling activation state and refreshing highlights
+     * @param {any} message - Message object from popup or background
+     */
+    const handleMessage = (message: any) => {
+      console.log("messageeeeeeeeeeeeeeee")
+      if (message.type === "TOGGLE_ACTIVATION") {
+        const newState = !isActivated
+        setIsActivated(newState)
+        setShowToolbar(newState)
+        localStorage.setItem(ACTIVATION_STATE_KEY, newState.toString())
+
+        // Reset states when deactivating
+        if (!newState) {
+          setIsSelectingForNote(false)
+          setShowOverlay(false)
+          setShowTooltip(false)
+        }
+      } else if (message.type === "REFRESH_HIGHLIGHTS") {
+        renderHighlights()
+      }
+    }
+
+    chrome.runtime.onMessage.addListener(handleMessage)
+
+    /**
+     * Handles text selection changes on the page
+     * Only shows overlay when extension is activated and user is in note-selection mode
+     */
+    const handleSelectionChange = () => {
+      console.log("select changed",)
+      if (!isActivated || !isSelectingForNote) return
+
+      const selection = window.getSelection()
+      if (!selection || selection.isCollapsed) {
+        setShowOverlay(false)
+        return
+      }
+
+      const text = selection.toString().trim()
+      if (text.length < 3) {
+        setShowOverlay(false)
+        return
+      }
+
+      const range = selection.getRangeAt(0)
+      const rect = range.getBoundingClientRect()
+
+      setSelectedText(text)
+      setOverlayPosition({
+        x: rect.left + window.scrollX,
+        y: rect.bottom + window.scrollY
+      })
+      setShowOverlay(true)
+    }
+
+    /**
+     * Handles clicks on the page
+     * Shows tooltip when clicking on highlighted text (regardless of activation state)
+     * Hides tooltip when clicking elsewhere
+     * @param {MouseEvent} e - Mouse click event
+     */
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as Element
+      if (target.classList.contains(HIGHLIGHT_CLASS)) {
+        e.preventDefault()
+        e.stopPropagation()
+
+        const highlightId = target.getAttribute("data-highlight-id")
+        if (highlightId) {
+          const highlight = HighlightStorage.getAll().find(
+            (h) => h.id === highlightId
+          )
+          if (highlight) {
+            setActiveHighlight(highlight)
+            setTooltipPosition({
+              x: e.clientX + window.scrollX,
+              y: e.clientY + window.scrollY
+            })
+            setShowTooltip(true)
+          }
+        }
+      } else {
+        setShowTooltip(false)
+      }
+    }
+
+    document.addEventListener("selectionchange", handleSelectionChange)
+    document.addEventListener("click", handleClick)
+
+    /**
+     * Cleanup function to remove event listeners and Chrome API handlers
+     * Prevents memory leaks when component unmounts
+     */
+    return () => {
+      chrome.runtime.onMessage.removeListener(handleMessage)
+      document.removeEventListener("selectionchange", handleSelectionChange)
+      document.removeEventListener("click", handleClick)
+    }
+  }, [isActivated, isSelectingForNote])
+    
+
+  /**
+   * Handles when user clicks the note icon in the toolbar
+   * Activates text selection mode for adding notes
+   */
+  const handleNoteClick = () => {
+    setIsSelectingForNote(true)
+    // Clear any existing selection and prompt user to select text
+    window.getSelection()?.removeAllRanges()
+  }
+
+  /**
+   * Handles saving a new highlight to storage and updating the display
+   * Creates a unique ID and timestamp for the highlight before saving
+   * Uses the currently selected color from the toolbar
+   * @param {Omit<Highlight, "id" | "timestamp" | "color">} highlightData - The highlight data without ID, timestamp, and color
+   */
+  const handleSaveHighlight = (
+    highlightData: Omit<Highlight, "id" | "timestamp" | "color">
+  ) => {
+    const highlight: Highlight = {
+      ...highlightData,
+      id: Math.random().toString(36).substr(2, 9),
+      timestamp: Date.now(),
+      color: selectedColor
+    }
+
+    HighlightStorage.save(highlight)
+    setShowOverlay(false)
+    setIsSelectingForNote(false) // Exit note selection mode
+
+    // Clear the current text selection
+    window.getSelection()?.removeAllRanges()
+
+    // Re-render highlights with a small delay to ensure DOM is ready
+    setTimeout(() => renderHighlights(), 100)
+  }
+
+  /**
+   * Handles closing the overlay without saving
+   * Exits note selection mode and clears the overlay
+   */
+  const handleCloseOverlay = () => {
+    setShowOverlay(false)
+    setIsSelectingForNote(false)
+    window.getSelection()?.removeAllRanges()
+  }
+
+  /**
+   * Handles updating an existing highlight with new data
+   * Updates both storage and active highlight state if applicable
+   * @param {string} id - The ID of the highlight to update
+   * @param {Partial<Highlight>} updates - The partial data to update
+   */
+  const handleUpdateHighlight = (id: string, updates: Partial<Highlight>) => {
+    HighlightStorage.update(id, updates)
+    if (activeHighlight) {
+      setActiveHighlight({ ...activeHighlight, ...updates })
+    }
+  }
+
+  /**
+   * Handles deleting a highlight from storage and updating the display
+   * Removes the highlight from storage, hides tooltip, and re-renders the page
+   * @param {string} id - The ID of the highlight to delete
+   */
+  const handleDeleteHighlight = (id: string) => {
+    HighlightStorage.delete(id)
+    setShowTooltip(false)
+    renderHighlights()
+  }
+
+  /**
+   * Loads all highlights from storage and renders them on the current page
+   * This is the core rendering function that:
+   * 1. Removes any existing highlight elements to prevent duplicates
+   * 2. Retrieves highlights specific to the current page URL
+   * 3. Attempts to restore each highlight using its stored XPath location
+   * 4. Handles cases gracefully when elements can't be found (page changes)
+   */
+  const renderHighlights = () => {
+    // Remove existing highlights and restore original text
+    document.querySelectorAll(`.${HIGHLIGHT_CLASS}`).forEach((el) => {
+      const parent = el.parentNode
+      if (parent) {
+        parent.replaceChild(document.createTextNode(el.textContent || ""), el)
+        parent.normalize()
+      }
+    })
+
+    // Get highlights for the current page only
+    const highlights = HighlightStorage.getByUrl(window.location.href)
+
+    // Attempt to restore each highlight
+    highlights.forEach((highlight) => {
+      try {
+        const element = getElementByXPath(highlight.xpath)
+        if (element) {
+          highlightTextInElement(element, highlight)
+        }
+      } catch (error) {
+        console.warn("Could not restore highlight:", error)
+      }
+    })
+  }
+
+  /**
+   * Creates a visual highlight within a specific DOM element
+   * Uses a tree walker to find text nodes and applies highlighting based on stored offsets
+   * This function handles the complex task of:
+   * 1. Walking through all text nodes in the element
+   * 2. Finding the exact text range based on character offsets
+   * 3. Splitting text nodes and inserting highlight spans
+   * 4. Preserving the original text structure
+   *
+   * @param {Element} element - The DOM element containing the text to highlight
+   * @param {Highlight} highlight - The highlight object with position and style data
+   */
+  const highlightTextInElement = (element: Element, highlight: Highlight) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+
+    // Collect all text nodes in the element
+    const textNodes: Text[] = []
+    let node
+    while ((node = walker.nextNode())) {
+      textNodes.push(node as Text)
+    }
+
+    // Track character offset across all text nodes
+    let currentOffset = 0
+    for (const textNode of textNodes) {
+      const nodeLength = textNode.textContent?.length || 0
+      const nodeStart = currentOffset
+      const nodeEnd = currentOffset + nodeLength
+
+      // Check if this text node contains our highlight range
+      if (
+        nodeStart <= highlight.startOffset &&
+        highlight.endOffset <= nodeEnd
+      ) {
+        // Calculate offsets within this specific text node
+        const startOffset = highlight.startOffset - nodeStart
+        const endOffset = highlight.endOffset - nodeStart
+
+        // Split the text into before, highlighted, and after sections
+        const before = textNode.textContent?.substring(0, startOffset) || ""
+        const highlighted =
+          textNode.textContent?.substring(startOffset, endOffset) || ""
+        const after = textNode.textContent?.substring(endOffset) || ""
+
+        if (highlighted) {
+          // Create the highlight span with styling and data attributes
+          const span = document.createElement("span")
+          span.className = `${HIGHLIGHT_CLASS} cursor-pointer transition-opacity hover:opacity-80`
+          span.setAttribute("data-highlight-id", highlight.id)
+          span.textContent = highlighted
+          span.title = highlight.note || "Click to view note"
+
+          // Apply the stored highlight color
+          span.style.backgroundColor = highlight.color || "#fef08a"
+          span.style.borderRadius = "2px"
+          span.style.padding = "1px 2px"
+
+          // Replace the original text node with the split text and highlight span
+          const parent = textNode.parentNode
+          if (parent) {
+            if (before)
+              parent.insertBefore(document.createTextNode(before), textNode)
+            parent.insertBefore(span, textNode)
+            if (after)
+              parent.insertBefore(document.createTextNode(after), textNode)
+            parent.removeChild(textNode)
+          }
+        }
+        break
+      }
+
+      currentOffset = nodeEnd
+    }
+  }
+
+  return (
+    <>
+      {/* Draggable toolbar for color selection and note creation */}
+      <HighlightToolbar
+        isVisible={showToolbar}
+        selectedColor={selectedColor}
+        onColorChange={setSelectedColor}
+        onNoteClick={handleNoteClick}
+      />
+
+      {/* Overlay for creating new highlights when text is selected in note mode */}
+      {showOverlay && (
+        <HighlightOverlay
+          selectedText={selectedText}
+          position={overlayPosition}
+          onSave={handleSaveHighlight}
+          onClose={handleCloseOverlay}
+        />
+      )}
+
+      {/* Tooltip for viewing and editing existing highlights */}
+      {showTooltip && activeHighlight && (
+        <HighlightTooltip
+          highlight={activeHighlight}
+          position={tooltipPosition}
+          onUpdate={handleUpdateHighlight}
+          onDelete={handleDeleteHighlight}
+          onClose={() => setShowTooltip(false)}
+        />
+      )}
+    </>
+  )
 }
 
 export default Content
