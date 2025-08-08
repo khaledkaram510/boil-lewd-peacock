@@ -71,33 +71,52 @@ const Content = () => {
 
     /**
      * Handles text selection changes on the page
-     * Only shows overlay when extension is activated and user is in note-selection mode
+     * Only updates selectedText state, does not create highlight
      */
     const handleSelectionChange = () => {
-      console.log("select changed",)
-      if (!isActivated || !isSelectingForNote) return
-
+      if (!isActivated) return
       const selection = window.getSelection()
-      if (!selection || selection.isCollapsed) {
-        setShowOverlay(false)
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0)
         return
-      }
-
       const text = selection.toString().trim()
-      if (text.length < 3) {
-        setShowOverlay(false)
-        return
-      }
-
-      const range = selection.getRangeAt(0)
-      const rect = range.getBoundingClientRect()
-
       setSelectedText(text)
-      setOverlayPosition({
-        x: rect.left + window.scrollX,
-        y: rect.bottom + window.scrollY
-      })
-      setShowOverlay(true)
+    }
+
+    /**
+     * Handles mouseup event to create highlight only if selection covers the entire text node
+     */
+    const handleMouseUp = () => {
+      if (!isActivated) return
+      const selection = window.getSelection()
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0)
+        return
+      const text = selection.toString().trim()
+      if (text.length < 3) return
+      const range = selection.getRangeAt(0)
+      // Only highlight if selection covers the entire text node
+      if (
+        range.startContainer.nodeType === Node.TEXT_NODE &&
+        range.startContainer === range.endContainer
+      ) {
+        console.log(
+          text,
+          selection,
+          range,
+          range.startContainer.nodeType,
+          Node.TEXT_NODE,
+          range.startContainer,
+          range.endContainer
+        )
+        const xpath = generateXPath(range.commonAncestorContainer)
+        handleSaveHighlight({
+          url: window.location.href,
+          text: text,
+          note: "",
+          startOffset: range.startOffset,
+          endOffset: range.endOffset,
+          xpath
+        })
+      }
     }
 
     /**
@@ -132,6 +151,7 @@ const Content = () => {
     }
 
     document.addEventListener("selectionchange", handleSelectionChange)
+    document.addEventListener("mouseup", handleMouseUp)
     document.addEventListener("click", handleClick)
 
     /**
@@ -141,10 +161,10 @@ const Content = () => {
     return () => {
       chrome.runtime.onMessage.removeListener(handleMessage)
       document.removeEventListener("selectionchange", handleSelectionChange)
+      document.removeEventListener("mouseup", handleMouseUp)
       document.removeEventListener("click", handleClick)
     }
   }, [isActivated, isSelectingForNote])
-    
 
   /**
    * Handles when user clicks the note icon in the toolbar
@@ -173,11 +193,11 @@ const Content = () => {
     }
 
     HighlightStorage.save(highlight)
-    setShowOverlay(false)
-    setIsSelectingForNote(false) // Exit note selection mode
+    // setShowOverlay(false)
+    // setIsSelectingForNote(false) // Exit note selection mode
 
     // Clear the current text selection
-    window.getSelection()?.removeAllRanges()
+    // window.getSelection()?.removeAllRanges()
 
     // Re-render highlights with a small delay to ensure DOM is ready
     setTimeout(() => renderHighlights(), 100)
@@ -338,12 +358,13 @@ const Content = () => {
 
       {/* Overlay for creating new highlights when text is selected in note mode */}
       {showOverlay && (
-        <HighlightOverlay
-          selectedText={selectedText}
-          position={overlayPosition}
-          onSave={handleSaveHighlight}
-          onClose={handleCloseOverlay}
-        />
+        <></>
+        // <HighlightOverlay
+        //   selectedText={selectedText}
+        //   position={overlayPosition}
+        //   onSave={handleSaveHighlight}
+        //   onClose={handleCloseOverlay}
+        // />
       )}
 
       {/* Tooltip for viewing and editing existing highlights */}
@@ -361,3 +382,56 @@ const Content = () => {
 }
 
 export default Content
+
+/**
+ * Generates an XPath expression for a given DOM node
+ *
+ * XPath provides a reliable way to locate elements even after page changes.
+ * This function creates a path from the root document to the target element
+ * by traversing up the DOM tree and noting each element's position among siblings.
+ *
+ * The generated XPath format: /html[1]/body[1]/div[2]/p[1]
+ * Numbers indicate the element's position among same-type siblings.
+ *
+ * @param {Node} element - The DOM node to generate XPath for
+ * @returns {string} The XPath expression as a string
+ */
+function generateXPath(element: Node): string {
+  // Handle text nodes by getting their parent element
+  if (element.nodeType === Node.TEXT_NODE) {
+    element = element.parentNode!
+  }
+
+  // Only process element nodes
+  if (element.nodeType !== Node.ELEMENT_NODE) {
+    return ""
+  }
+
+  const xpath: string[] = []
+  let current = element as Element
+
+  // Traverse up the DOM tree to build the path
+  while (current && current.nodeType === Node.ELEMENT_NODE) {
+    let index = 1
+    let sibling = current.previousSibling
+
+    // Count same-name siblings that come before this element
+    while (sibling) {
+      if (
+        sibling.nodeType === Node.ELEMENT_NODE &&
+        sibling.nodeName === current.nodeName
+      ) {
+        index++
+      }
+      sibling = sibling.previousSibling
+    }
+
+    // Build path segment: tagname[position]
+    const tagName = current.nodeName.toLowerCase()
+    xpath.unshift(`${tagName}[${index}]`)
+    current = current.parentNode as Element
+  }
+
+  // Return complete XPath starting with root slash
+  return `/${xpath.join("/")}`
+}
