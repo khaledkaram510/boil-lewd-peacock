@@ -3,8 +3,20 @@ import { HighlightToolbar } from "@/components/HighlightToolbar"
 import { HighlightTooltip } from "@/components/HighlightTooltip"
 import { getElementByXPath, HighlightStorage } from "@/lib/storage"
 import type { Highlight } from "@/lib/types"
+// Adopt Tailwind CSS into the Shadow DOM so utility classes work inside Plasmo's content UI
+import cssText from "data-text:~styles/globals.css"
 import React, { useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
+
+import { Storage as PlasmoStorage } from "@plasmohq/storage"
+import { useStorage } from "@plasmohq/storage/hook"
+
+export const getStyle = () => {
+  const style = document.createElement("style")
+  // Ensure CSS variables scoped to the CSUI shadow root
+  style.textContent = cssText.replaceAll(":root", ":host(plasmo-csui)")
+  return style
+}
 
 // CSS class name used to identify highlighted text elements
 const HIGHLIGHT_CLASS = "text-highlight-extension"
@@ -22,7 +34,11 @@ const ACTIVATION_STATE_KEY = "highlighter_activated"
  */
 const Content = () => {
   // State management for extension activation and UI
-  const [isActivated, setIsActivated] = useState(false) // Controls extension activation state
+  // Persist activation state in extension local storage via Plasmo Storage
+  const [isActivated, setIsActivated] = useStorage<boolean>({
+    key: ACTIVATION_STATE_KEY,
+    instance: new PlasmoStorage({ area: "local" })
+  })
   const [showToolbar, setShowToolbar] = useState(false) // Controls toolbar visibility
   const [showOverlay, setShowOverlay] = useState(false) // Controls highlight creation overlay visibility
   const [showTooltip, setShowTooltip] = useState(false) // Controls highlight tooltip visibility
@@ -34,10 +50,8 @@ const Content = () => {
   const [activeHighlight, setActiveHighlight] = useState<Highlight | null>(null) // Currently active highlight for tooltip
 
   useEffect(() => {
-    // Load activation state from localStorage on component mount
-    const savedState = localStorage.getItem(ACTIVATION_STATE_KEY)
-    const activated = savedState === "true"
-    setIsActivated(activated)
+    // Sync toolbar visibility with stored activation state
+    const activated = Boolean(isActivated)
     setShowToolbar(activated)
 
     // Always load and render existing highlights regardless of activation state
@@ -51,10 +65,9 @@ const Content = () => {
     const handleMessage = (message: any) => {
       console.log("messageeeeeeeeeeeeeeee")
       if (message.type === "TOGGLE_ACTIVATION") {
-        const newState = !isActivated
+        const newState = !Boolean(isActivated)
         setIsActivated(newState)
         setShowToolbar(newState)
-        localStorage.setItem(ACTIVATION_STATE_KEY, newState.toString())
 
         // Reset states when deactivating
         if (!newState) {

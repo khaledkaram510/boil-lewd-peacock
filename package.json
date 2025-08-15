@@ -11,6 +11,7 @@
     "css:build": "tailwindcss -i ./src/styles/globals.css -o ./src/styles/globals.css --watch"
   },
   "dependencies": {
+    "@plasmohq/storage": "^1.15.0",
     "@radix-ui/react-popover": "^1.1.14",
     "@radix-ui/react-slot": "^1.2.3",
     "class-variance-authority": "^0.7.1",
